@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Garden monitor</title>
+<style>
+  :root {
+    --bg: #eef3f1; --surface: #ffffff; --ink: #14262b; --muted: #5b6f73;
+    --line: #d3dedb; --water: #1b6ca8; --ok: #2f7d4f; --warn: #b7791f; --crit: #b3372f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1b1e; --surface: #162a2e; --ink: #e6f0ee; --muted: #93aaad;
+            --line: #27424700; --water: #5fb0e8; --ok: #6cc08b; --warn: #e0b45c; --crit: #ee8a80; --line: #2a4448; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 16px/1.5 "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 32px 20px 64px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+  h1 { font-size: 1.6rem; margin: 0; }
+  h2 { font-size: 1.05rem; margin: 0 0 12px; }
+  .status { color: var(--muted); font-size: .9rem; }
+  .status.bad { color: var(--crit); }
+  .hero { margin: 28px 0; }
+  .hero .big { font-size: 4.5rem; line-height: 1; font-weight: 600; color: var(--water); }
+  .hero .big small { font-size: 1.6rem; color: var(--muted); }
+  .grid { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  section { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+  .zones { display: grid; gap: 10px; }
+  .zone { display: grid; grid-template-columns: 110px 1fr 52px; gap: 10px; align-items: center; font-size: .95rem; }
+  .bar { height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--water); }
+  .bar i.low { background: var(--warn); }
+  ul { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow-y: auto; }
+  li { padding: 9px 0; border-bottom: 1px solid var(--line); font-size: .93rem; display: flex; gap: 10px; }
+  li:last-child { border: 0; }
+  li time { color: var(--muted); margin-left: auto; white-space: nowrap; font-size: .85rem; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 7px; flex: none; background: var(--ok); }
+  .dot.warning { background: var(--warn); } .dot.critical { background: var(--crit); }
+  svg { width: 100%; height: 140px; display: block; }
+  .empty { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Garden monitor</h1>
+    <span id="status" class="status">Loading…</span>
+  </header>
+
+  <div class="hero">
+    <div class="big" id="latest-moisture">–<small>%</small></div>
+    <div class="status" id="latest-caption">Latest soil moisture</div>
+  </div>
+
+  <div class="grid">
+    <section>
+      <h2>Moisture by zone</h2>
+      <div class="zones" id="zones"><span class="empty">No readings yet.</span></div>
+    </section>
+    <section>
+      <h2>Moisture trend (Tomato bed)</h2>
+      <svg id="trend" viewBox="0 0 400 140" preserveAspectRatio="none" role="img" aria-label="Soil moisture trend"></svg>
+    </section>
+    <section>
+      <h2>Recent events</h2>
+      <ul id="events"><li class="empty">No events yet.</li></ul>
+    </section>
+    <section>
+      <h2>Motion detections</h2>
+      <ul id="motion"><li class="empty">No motion recorded.</li></ul>
+    </section>
+  </div>
+</main>
+
+<script>
+  const API = "http://localhost:5002"; // must match an origin in FRONTEND_ORIGINS
+  const $ = (id) => document.getElementById(id);
+  const when = (iso) => new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const byNewest = (a, b) => new Date(b.timestamp) - new Date(a.timestamp);
+  const get = async (path) => {
+    const res = await fetch(API + path);
+    if (!res.ok) throw new Error(path + " returned " + res.status);
+    return res.json();
+  };
+
+  function text(tag, str, cls) {
+    const el = document.createElement(tag);
+    el.textContent = str;
+    if (cls) el.className = cls;
+    return el;
+  }
+
+  function renderZones(readings) {
+    const latest = {};
+    readings.sort(byNewest).forEach((r) => { if (!(r.zone in latest)) latest[r.zone] = r; });
+    const box = $("zones");
+    box.replaceChildren();
+    Object.entries(latest).forEach(([zone, r]) => {
+      const row = document.createElement("div");
+      row.className = "zone";
+      const bar = document.createElement("div");
+      bar.className = "bar";
+      const fill = document.createElement("i");
+      fill.style.width = Math.min(r.moisturePercent, 100) + "%";
+      if (r.moisturePercent < 25) fill.className = "low";
+      bar.append(fill);
+      row.append(text("span", zone), bar, text("span", r.moisturePercent + "%"));
+      box.append(row);
+    });
+  }
+
+  function renderTrend(readings) {
+    const pts = readings.filter((r) => r.zone === "Tomato bed").sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    const svg = $("trend");
+    if (pts.length < 2) return;
+    const x = (i) => (i / (pts.length - 1)) * 400;
+    const y = (v) => 135 - (v / 100) * 130;
+    const d = pts.map((p, i) => (i ? "L" : "M") + x(i).toFixed(1) + " " + y(p.moisturePercent).toFixed(1)).join(" ");
+    svg.innerHTML = '<path d="' + d + '" fill="none" stroke="var(--water)" stroke-width="2" vector-effect="non-scaling-stroke"/>';
+  }
+
+  function renderList(id, items, label, severity) {
+    const ul = $(id);
+    if (!items.length) return;
+    ul.replaceChildren();
+    items.forEach((item) => {
+      const li = document.createElement("li");
+      const dot = document.createElement("span");
+      dot.className = "dot " + (severity ? severity(item) : "");
+      li.append(dot, text("span", label(item)), text("time", when(item.timestamp)));
+      ul.append(li);
+    });
+  }
+
+  async function load() {
+    try {
+      const [soil, motion, events, latest] = await Promise.all([
+        get("/api/soil-moisture?limit=100"),
+        get("/api/motion?limit=100"),
+        get("/api/events?limit=100"),
+        get("/api/readings/latest"),
+      ]);
+      if (latest.soilMoisture) {
+        $("latest-moisture").firstChild.textContent = latest.soilMoisture.moisturePercent;
+        $("latest-caption").textContent = "Latest reading: " + latest.soilMoisture.zone + ", " + when(latest.soilMoisture.timestamp);
+      }
+      renderZones(soil);
+      renderTrend(soil);
+      renderList("events", events.sort(byNewest).slice(0, 15), (e) => e.message, (e) => e.severity);
+      renderList("motion", motion.sort(byNewest).slice(0, 15), (m) => m.zone + " – " + m.durationSeconds + "s");
+      $("status").textContent = "Updated " + new Date().toLocaleTimeString();
+      $("status").className = "status";
+    } catch (err) {
+      $("status").textContent = "Can't reach the backend at " + API + ". Is app.py running?";
+      $("status").className = "status bad";
+      console.error(err);
+    }
+  }
+
+  load();
+  setInterval(load, 30000);
+</script>
+</body>
+</html>
